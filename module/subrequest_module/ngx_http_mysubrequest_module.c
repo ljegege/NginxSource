@@ -1,0 +1,214 @@
+#include <ngx_config.h>
+#include <ngx_core.h>
+#include <ngx_http.h>
+//#include <ngx_http_proxy_module.c>
+typedef struct{
+	ngx_http_upstream_conf_t upstream;
+}ngx_http_mysubrequest_conf_t;
+
+typedef struct{
+	ngx_str_t stock;
+}ngx_http_mysubrequest_ctx_t;
+
+// 函数声明
+static char* ngx_http_mysubrequest(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+//static void mysubrequest_upstream_finalize_request(ngx_http_request_t *r, ngx_int_t rc);
+//static ngx_int_t mysubrequest_process_status_line(ngx_http_request_t *r);
+static ngx_int_t ngx_http_mysubrequest_handler(ngx_http_request_t *r);
+//static ngx_int_t ngx_http_mytset_handler(ngx_http_request_t *r);
+static char* ngx_http_mytest(ngx_conf_t *cf, ngx_command_t *cmd, void *conf);
+
+
+static ngx_http_module_t ngx_http_mysubrequest_module_ctx = {
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
+};
+
+static ngx_command_t ngx_http_mysubrequest_commands[] = {
+	{ ngx_string("mysubrequest"),
+	  NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+	  ngx_http_mysubrequest,
+	  NGX_HTTP_LOC_CONF_OFFSET,
+	  0,
+	  NULL },
+	{ ngx_string("mytest"),
+	  NGX_HTTP_LOC_CONF|NGX_CONF_TAKE1,
+	  ngx_http_mytest,
+	  NGX_HTTP_LOC_CONF_OFFSET,
+	  0,
+	  NULL },
+	  ngx_null_command
+};
+
+ngx_module_t ngx_http_mysubrequest_module = {
+	NGX_MODULE_V1,
+	&ngx_http_mysubrequest_module_ctx,
+	ngx_http_mysubrequest_commands,
+	NGX_HTTP_MODULE,
+	NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+	NGX_MODULE_V1_PADDING
+};
+
+static void psubrequest_post_handler(ngx_http_request_t *r)
+{
+	printf("enter psubrequest_post_handler\n");
+	if(r->headers_out.status != NGX_HTTP_OK){
+		ngx_http_finalize_request(r, r->headers_out.status);
+		return;
+	}
+	ngx_http_mysubrequest_ctx_t* myctx = ngx_http_get_module_ctx(r, ngx_http_mysubrequest_module);
+	/*ngx_buf_t *buf = ngx_palloc(r->pool, sizeof(ngx_buf_t));
+	buf->pos = myctx->stock.data;
+	buf->last = myctx->stock.data + myctx->stock.len;*/
+	
+	ngx_buf_t *buf = ngx_create_temp_buf(r->pool, myctx->stock.len);
+	ngx_memcpy(buf->pos, myctx->stock.data, myctx->stock.len);
+	buf->last_buf = 1;
+	buf->last = buf->pos + myctx->stock.len;
+	printf("%*s\n", myctx->stock.len, myctx->stock.data);
+	ngx_chain_t out;
+	out.buf = buf;
+	out.next = NULL;
+	static ngx_str_t type = ngx_string("text/plain; charset=GBK");
+	r->headers_out.content_type = type;
+	r->headers_out.status = NGX_HTTP_OK;
+	
+	r->connection->buffered |= NGX_HTTP_WRITE_BUFFERED;
+	ngx_int_t rc = ngx_http_send_header(r);
+	if(rc == NGX_ERROR || rc > NGX_OK || r->header_only){
+		printf("can't send the http header\n");
+		return;
+	}
+	rc = ngx_http_output_filter(r, &out);
+	if(rc == NGX_ERROR || rc > NGX_OK || r->header_only){
+		printf("can't send the http body\n");
+		return;
+	}
+	ngx_http_finalize_request(r, rc);
+	printf("leave psubrequest_post_handler\n");
+}
+
+static ngx_int_t mysubrequest_post_handler(ngx_http_request_t *r, void *data, ngx_int_t rc)
+{
+	printf("enter mysubrequest_post_handler\n");
+	ngx_http_request_t *pr = r->parent;
+	ngx_http_mysubrequest_ctx_t *myctx = (ngx_http_mysubrequest_ctx_t*)data;
+	pr->headers_out.status = r->headers_out.status;
+	if(pr->headers_out.status == NGX_HTTP_OK){
+		myctx->stock.len = r->upstream->buffer.last - r->upstream->buffer.pos;
+		myctx->stock.data = r->upstream->buffer.pos;
+	}
+	pr->write_event_handler = psubrequest_post_handler;
+	printf("leave mysubrequest_post_handler\n");
+	return NGX_OK;
+}
+
+
+/*static void mysubrequest_upstream_finalize_request(ngx_http_request_t *r, ngx_int_t rc)
+{
+	printf("enter mysubrequest_upstream_finalize_request\n");
+	ngx_log_error(NGX_LOG_DEBUG, r->connection->log, 0, "mysubrequest_upstream_finalize_request");
+	printf("leave mysubrequest_upstream_finalize_request\n");
+}*/
+
+static ngx_int_t ngx_http_mysubrequest_handler(ngx_http_request_t *r)
+{
+	printf("enter ngx_http_mysubrequest_handler\n");
+	ngx_http_mysubrequest_ctx_t* myctx = ngx_http_get_module_ctx(r, ngx_http_mysubrequest_module);
+	if(myctx == NULL){
+		myctx = ngx_palloc(r->pool, sizeof(ngx_http_mysubrequest_ctx_t));
+		if(myctx == NULL){
+			return NGX_ERROR;
+		}
+		ngx_http_set_ctx(r, myctx, ngx_http_mysubrequest_module);
+	}
+	
+	ngx_http_post_subrequest_t *psr = ngx_palloc(r->pool, sizeof(ngx_http_post_subrequest_t));
+	psr->handler = mysubrequest_post_handler;
+	psr->data = myctx;
+	
+	ngx_str_t subPrefix = ngx_string("/list=");
+	ngx_str_t subLocation;
+	subLocation.len = subPrefix.len + r->args.len;
+	subLocation.data = ngx_palloc(r->pool, subLocation.len);
+	ngx_snprintf(subLocation.data, subLocation.len, "%V%V", &subPrefix, &r->args);
+	
+	ngx_http_request_t * sr;
+	ngx_int_t rc = ngx_http_subrequest(r, &subLocation, NULL, &sr, psr, NGX_HTTP_SUBREQUEST_IN_MEMORY);
+	if(rc != NGX_OK){
+		return NGX_ERROR;
+	}
+	printf("leave ngx_http_mysubrequest_handler\n");
+	return NGX_DONE;
+}
+
+
+static ngx_int_t ngx_http_mytset_handler(ngx_http_request_t *r)
+{
+	if(!(r->method & (NGX_HTTP_GET | NGX_HTTP_HEAD))){
+		return NGX_HTTP_NOT_ALLOWED;
+	}
+
+	ngx_int_t rc = ngx_http_discard_request_body(r);
+	if(rc != NGX_OK){
+		return rc;
+	}
+
+	ngx_buf_t *b;
+	b = ngx_palloc(r->pool, sizeof(ngx_buf_t));
+	b->in_file = 1;
+	b->file = ngx_palloc(r->pool, sizeof(ngx_file_t));
+	b->file->fd = ngx_open_file("/home/lje/test.txt", NGX_FILE_RDONLY|NGX_FILE_NONBLOCK, NGX_FILE_OPEN, 0);
+	b->file->log = r->connection->log;
+	b->file->name.data = (u_char*)"/home/lje/test.txt";
+	b->file->name.len = sizeof("/home/lje/test.txt") - 1;
+	if(b->file->fd <= 0){
+		printf("can't open the file\n");
+		return NGX_HTTP_NOT_FOUND;
+	}
+
+	if(ngx_file_info("/home/lje/test.txt", &b->file->info) == NGX_FILE_ERROR){
+		printf("can't get the file's infomation\n");
+		return NGX_HTTP_INTERNAL_SERVER_ERROR;
+	}
+	
+	ngx_str_t type = ngx_string("text/html");
+	r->headers_out.status = NGX_HTTP_OK;
+	r->headers_out.content_type = type;
+	r->headers_out.content_length_n = b->file->info.st_size;
+	
+	b->file_pos = 0;
+	b->file_last = b->file->info.st_size;
+
+	// 发送http头部
+	rc = ngx_http_send_header(r);
+	if(rc == NGX_ERROR || rc > NGX_OK || r->header_only){
+		printf("can't send the http header\n");
+		return rc;
+	}
+	printf("send the http header success\n");
+	ngx_chain_t out;
+	out.buf = b;
+	out.next = NULL;
+	return ngx_http_output_filter(r, &out);
+}
+
+static char* ngx_http_mysubrequest(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+	printf("enter ngx_http_mysubrequest\n");
+	ngx_http_core_loc_conf_t *clcf;
+	clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
+	clcf->handler = ngx_http_mysubrequest_handler;
+	printf("leave ngx_http_mysubrequest\n");
+	return NGX_CONF_OK;
+}
+
+static char* ngx_http_mytest(ngx_conf_t *cf, ngx_command_t *cmd, void *conf)
+{
+	printf("enter ngx_http_mytest\n");
+	ngx_http_core_loc_conf_t *clcf;
+	clcf = ngx_http_conf_get_module_loc_conf(cf, ngx_http_core_module);
+	clcf->handler = ngx_http_mytset_handler;
+	printf("leave ngx_http_mytest\n");
+	return NGX_CONF_OK;
+}
+
